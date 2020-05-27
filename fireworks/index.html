@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>Hello WebSockets</title>
+  </head>
+  <body>
+    <h2>Websocket fireworks!</h2>
+    <div><p>
+    I'm learning about websockets. Don't expect anything amazing.
+    Who are you? What colour fireworks do you want?
+    </p></div>
+    <form name="publish">
+      <input type="text" name="message" onfocus="this.value=''">
+      <input type="submit" value="Send">
+    </form>
+    <div id="messages"></div>
+    <div id="imagestream">
+    </div>
+
+    <script>
+
+      // TODO: replace with where this is running
+      var socket = new WebSocket("ws://localhost:8080/ws");
+      console.log("open websocket pls");
+
+      document.forms.publish.onsubmit = function() {
+        var outgoingMessage = this.message.value;
+        socket.send(outgoingMessage)
+        this.message.value=''
+        return false;  // TODO: why?
+      }
+
+      socket.onmessage = function(event) {
+        console.log("got a message: " + event.data)
+
+        try {
+          var received = JSON.parse(event.data)
+        } catch (e) {
+          console.error('Invalid message from server:', e, event.data)
+        }
+        console.log(received)
+        var message = received["Words"]
+        var rawImage = received["Image"]
+
+        if (message != "") { // Text
+          let messageElem = document.createElement('div')
+          messageElem.textContent = "=> " + message
+          document.getElementById('messages').append(messageElem);
+        }
+        if (rawImage != "") {
+          var img = "data:image/png;base64, " + rawImage
+          let imageElem = document.createElement('img')
+          imageElem.src = img
+          imageElem.height = 200
+          document.getElementById('imagestream').prepend(imageElem)
+        }
+      }
+
+      socket.onopen = () => {
+        console.log("yay, socket opened")
+      };
+
+      socket.onclose = event => {
+        console.log("socket closed: ", event)
+        socket.send("client out")
+     };
+
+     socket.onerror = error => {
+        console.log("socket error: ", error);
+    };
+  </script>
+  </body>
+</html>
