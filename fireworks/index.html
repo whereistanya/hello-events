@@ -5,6 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
     <title>Hello WebSockets</title>
+    <style>
+      #container {
+        display: flex;
+      }
+      #messages {
+        flex: 0 0 35%;
+      }
+      #imagestream {
+        flex: 1;
+      }
+      h1{
+          color:green;
+          text-align:center;
+      }
+    </style>
   </head>
   <body>
     <h2>Websocket fireworks!</h2>
@@ -12,23 +27,35 @@
     I'm learning about websockets. Don't expect anything amazing.
     Who are you? What colour fireworks do you want?
     </p></div>
+    <div><p>
     <form name="publish">
+      <label for="name">Name:</label>
+      <input type="text" name="name" >
+      <label for="message">Firework colour:</label>
       <input type="text" name="message" onfocus="this.value=''">
       <input type="submit" value="Send">
     </form>
-    <div id="messages"></div>
-    <div id="imagestream">
+    </p></div>
+    <div id="container">
+      <div id="messages"></div>
+      <div id="imagestream"> </div>
     </div>
 
     <script>
 
       // TODO: replace with where this is running
+      var socket = new WebSocket("ws://botbot.noidea.dog/ws");
+      // uncomment when running locally
       var socket = new WebSocket("ws://localhost:8080/ws");
       console.log("open websocket pls");
 
       document.forms.publish.onsubmit = function() {
-        var outgoingMessage = this.message.value;
-        socket.send(outgoingMessage)
+        var outgoingMessage = {
+          color: this.message.value,
+          person: this.name.value,
+        }
+        console.log("Sending: " + JSON.stringify(outgoingMessage))
+        socket.send(JSON.stringify(outgoingMessage))
         this.message.value=''
         return false;  // TODO: why?
       }
@@ -48,13 +75,13 @@
         if (message != "") { // Text
           let messageElem = document.createElement('div')
           messageElem.textContent = "=> " + message
-          document.getElementById('messages').append(messageElem);
+          document.getElementById('messages').prepend(messageElem);
         }
         if (rawImage != "") {
           var img = "data:image/png;base64, " + rawImage
           let imageElem = document.createElement('img')
           imageElem.src = img
-          imageElem.height = 200
+          imageElem.height = 100
           document.getElementById('imagestream').prepend(imageElem)
         }
       }

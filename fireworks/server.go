@@ -2,18 +2,37 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+// The json payload sent via the websocket
+type msg struct {
+	Words  string
+	Image  string
+	Person string
+}
+
 var localtest = false
+
+// TODO: make this a ring buffer
+// TODO: also not a global variable wtf
+var buffer = []msg{}
+
+// TODO: same, global variable
+// TODO: remove dead sockets
+var sockets = []*websocket.Conn{}
+
+var defaultImage = "images/heart.jpeg"
 
 // Return the filename of an image, and a text string.
 // This is pretty stupid, but works well enough for demo code.
@@ -48,13 +67,17 @@ func homeEndpoint(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "index.html")
 }
 
-// The json payload sent via the websocket
-type msg struct {
-	Words string
-	Image string
+func backfillFireworks(ws *websocket.Conn) error {
+	for _, message := range buffer {
+		err := writeToSocket(ws, message)
+		if err != nil {
+			log.Println(err)
+		}
+	}
+	return nil
 }
 
-// websocket endpoint. Streams she-ra pictures.
+// websocket endpoint. Streams firework pictures.
 func wsEndpoint(w http.ResponseWriter, r *http.Request) {
 	var upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -69,51 +92,81 @@ func wsEndpoint(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Couldn't upgrade connection: %v", err)
+		return
 	}
 	log.Printf("Websocket connection established with %s", GetIP(r))
-	err = writeToSocket(ws, "Type who you are and what colour firework you want", "")
+	sockets = append(sockets, ws)
+
+	err = backfillFireworks(ws)
+
+	err = writeToSocket(ws, msg{Words: "Type who you are and what colour firework you want", Image: ""})
 
 	if err != nil {
 		log.Printf("Couldn't write to client: %v", err)
 	}
 
-	waitTime := time.Duration(5)
-	c1 := make(chan string, 1)
+	waitTime := time.Duration(60)
+
+	type request struct {
+		Color  string
+		Person string
+	}
+	c1 := make(chan request, 1)
 	for {
 		// Spinning this off into a goroutine so we can put a timer on it and take
 		// some indecisive action if there's no request for a while.
 		go func() {
+			var fromClient request
 			_, received, err := ws.ReadMessage()
+			json.Unmarshal([]byte(received), &fromClient)
+			log.Printf("Received message: %+v", fromClient)
 			if err != nil {
 				log.Println("Couldn't read message: ", err)
 			} else {
-				c1 <- string(received)
+				c1 <- fromClient // string(fromClient.Color)
 			}
 		}()
 
-		instr := ""
-		text := ""
+		m := msg{}
 
 		select {
 		case rec := <-c1: // got something from the client
-			instr = rec
-			text = fmt.Sprintf("wooo %s", instr)
+			req := rec
+			m.Words = fmt.Sprintf("%s: %s", req.Person, req.Color)
+			imageFile := chooseImage(strings.ToLower(req.Color))
+
+			if imageFile != "" {
+				encodedImage, err := smooshImage(imageFile)
+				if err != nil {
+					log.Printf("Couldn't encode image: %v", err)
+					continue
+				}
+				m.Image = encodedImage
+				buffer = append(buffer, m)
+			}
+
+			for _, socket := range sockets {
+				err = writeToSocket(socket, m)
+				if err != nil {
+					log.Println("Couldn't write to socket: ", err)
+					continue
+				}
+			}
+
 		case <-time.After(waitTime * time.Second): // nothing for a while; send a prompt
 			waitTime = waitTime + 1 // longer timeout next time
-			instr = "default"
-			text = "<3 <3"
-			log.Println("Timeout! Sending something!")
+			imageFile := defaultImage
+			encodedImage, err := smooshImage(imageFile)
+			if err != nil {
+				log.Printf("Couldn't encode image: %v", err)
+				continue
+			}
+			m.Image = encodedImage
+			m.Words = "Choose a firework <3 <3"
+			// Send only to this one socket.
+			err = writeToSocket(ws, m)
 		}
 
-		log.Printf("Received message: %s", instr)
-
-		image := chooseImage(instr)
-
-		err = writeToSocket(ws, text, image)
-		if err != nil {
-			log.Println("Couldn't write reply: ", err)
-			continue
-		}
 	}
 }
 
@@ -154,19 +207,8 @@ func smooshImage(filename string) (string, error) {
 }
 
 // write words and an image to the websocket.
-func writeToSocket(conn *websocket.Conn, words string, imageFile string) error {
-	m := msg{}
-	m.Words = words
-
-	if imageFile != "" {
-		encodedImage, err := smooshImage(imageFile)
-		if err != nil {
-			return err
-		}
-		m.Image = encodedImage
-	}
-
-	if err := conn.WriteJSON(m); err != nil {
+func writeToSocket(conn *websocket.Conn, message msg) error {
+	if err := conn.WriteJSON(message); err != nil {
 		return err
 	}
 	return nil
@@ -174,6 +216,7 @@ func writeToSocket(conn *websocket.Conn, words string, imageFile string) error {
 
 func main() {
 	localtest = true // Flip this when testing locally.
+	port := 80
 	logFile, err := os.OpenFile("logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		log.Fatal(err)
@@ -182,9 +225,10 @@ func main() {
 	log.SetOutput(logFile)
 	if localtest {
 		log.SetOutput(os.Stdout)
+		port = 8080
 	}
 	log.Println("Welcome to some terrible websockets test code.")
 	http.HandleFunc("/fireworks", homeEndpoint) // regular
 	http.HandleFunc("/ws", wsEndpoint)          // upgraded to websocket
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
 }
