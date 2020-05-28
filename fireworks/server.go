@@ -25,6 +25,7 @@ type msg struct {
 var localtest = false
 
 // TODO: make this a ring buffer
+// TODO: also cache repeated images
 // TODO: also not a global variable wtf
 var buffer = []msg{}
 
@@ -99,7 +100,7 @@ func wsEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	err = backfillFireworks(ws)
 
-	err = writeToSocket(ws, msg{Words: "Type who you are and what colour firework you want", Image: ""})
+	err = writeToSocket(ws, msg{Words: "Welcome to the websockets demo fireworks display. Every piece of software spontaneously generates its own chat functionality. Nobody knows why.", Image: ""})
 
 	if err != nil {
 		log.Printf("Couldn't write to client: %v", err)
