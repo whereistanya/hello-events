@@ -10,38 +10,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
+	_ "time"
 
 	"github.com/gorilla/websocket"
 )
 
-// The json payload sent via the websocket
-type msg struct {
-	Words  string
-	Image  string
-	Person string
-}
-
 var localtest = false
 
-// TODO: make this a ring buffer
-// TODO: also cache repeated images
-// TODO: also not a global variable wtf
-var buffer = []msg{}
+type ImageChooser struct {
+	defaultImage string
+}
 
-// TODO: same, global variable
-// TODO: remove dead sockets
-var sockets = []*websocket.Conn{}
-
-var defaultImage = "images/heart.jpeg"
+func NewImageChooser() ImageChooser {
+	return ImageChooser{defaultImage: "images/heart.jpeg"}
+}
 
 // Return the filename of an image, and a text string.
 // This is pretty stupid, but works well enough for demo code.
-// I use she-ra images when running this locally to entertain my kid,
-// but swapping in placeholders on github because obv I don't have
-// rights to the She-ra images.
-func chooseImage(instr string) string {
-	heart := "images/heart.jpeg"
+func (x *ImageChooser) chooseImage(instr string) string {
 	colors := map[string]string{
 		"blue":   "images/blue.jpeg",
 		"green":  "images/green.jpeg",
@@ -57,134 +43,14 @@ func chooseImage(instr string) string {
 	if ok {
 		return found
 	} else {
-		return heart
+		return x.defaultImage
 	}
-}
-
-// Serve index.html
-func homeEndpoint(w http.ResponseWriter, r *http.Request) {
-	log.Printf("HTTP connection from %s", GetIP(r))
-	w.Header().Set("Content-Type", "text/html")
-	http.ServeFile(w, r, "index.html")
-}
-
-func backfillFireworks(ws *websocket.Conn) error {
-	for _, message := range buffer {
-		err := writeToSocket(ws, message)
-		if err != nil {
-			log.Println(err)
-		}
-	}
-	return nil
-}
-
-// websocket endpoint. Streams firework pictures.
-func wsEndpoint(w http.ResponseWriter, r *http.Request) {
-	var upgrader = websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-	}
-	// Ignore CORS when testing locally.
-	if localtest {
-		upgrader.CheckOrigin = func(r *http.Request) bool {
-			return true
-		}
-	}
-	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("Couldn't upgrade connection: %v", err)
-		return
-	}
-	log.Printf("Websocket connection established with %s", GetIP(r))
-	sockets = append(sockets, ws)
-
-	err = backfillFireworks(ws)
-
-	err = writeToSocket(ws, msg{Words: "Welcome to the websockets demo fireworks display. Every piece of software spontaneously generates its own chat functionality. Nobody knows why.", Image: ""})
-
-	if err != nil {
-		log.Printf("Couldn't write to client: %v", err)
-	}
-
-	waitTime := time.Duration(60)
-
-	type request struct {
-		Color  string
-		Person string
-	}
-	c1 := make(chan request, 1)
-	for {
-		// Spinning this off into a goroutine so we can put a timer on it and take
-		// some indecisive action if there's no request for a while.
-		go func() {
-			var fromClient request
-			_, received, err := ws.ReadMessage()
-			json.Unmarshal([]byte(received), &fromClient)
-			log.Printf("Received message: %+v", fromClient)
-			if err != nil {
-				log.Println("Couldn't read message: ", err)
-			} else {
-				c1 <- fromClient // string(fromClient.Color)
-			}
-		}()
-
-		m := msg{}
-
-		select {
-		case rec := <-c1: // got something from the client
-			req := rec
-			m.Words = fmt.Sprintf("%s: %s", req.Person, req.Color)
-			imageFile := chooseImage(strings.ToLower(req.Color))
-
-			if imageFile != "" {
-				encodedImage, err := smooshImage(imageFile)
-				if err != nil {
-					log.Printf("Couldn't encode image: %v", err)
-					continue
-				}
-				m.Image = encodedImage
-				buffer = append(buffer, m)
-			}
-
-			for _, socket := range sockets {
-				err = writeToSocket(socket, m)
-				if err != nil {
-					log.Println("Couldn't write to socket: ", err)
-					continue
-				}
-			}
-
-		case <-time.After(waitTime * time.Second): // nothing for a while; send a prompt
-			waitTime = waitTime + 1 // longer timeout next time
-			imageFile := defaultImage
-			encodedImage, err := smooshImage(imageFile)
-			if err != nil {
-				log.Printf("Couldn't encode image: %v", err)
-				continue
-			}
-			m.Image = encodedImage
-			m.Words = "Choose a firework <3 <3"
-			// Send only to this one socket.
-			err = writeToSocket(ws, m)
-		}
-
-	}
-}
-
-// GetIP gets a requests IP address by reading off the forwarded-for
-// header (for proxies) and falls back to use the remote address.
-func GetIP(r *http.Request) string {
-	forwarded := r.Header.Get("X-FORWARDED-FOR")
-	if forwarded != "" {
-		return forwarded
-	}
-	return r.RemoteAddr
 }
 
 // Read an image and turn it into a base64 encoded string.
 // Stackoverflow says don't use base64, but they weren't super clear on what to
 // use instead, so we are where we are.
-func smooshImage(filename string) (string, error) {
+func (ImageChooser) smooshImage(filename string) (string, error) {
 	imageFile, err := os.Open(filename)
 	if err != nil {
 		return "", err
@@ -207,29 +73,187 @@ func smooshImage(filename string) (string, error) {
 	return encoded, nil
 }
 
+// Firework becomes a json payload sent to the client via the websocket
+type Firework struct {
+	Words string
+	Image string
+}
+
+// IncomingRequest is what the client sends to the server.
+type IncomingRequest struct {
+	Color  string
+	Person string
+}
+
+type OpenSocket struct {
+	ws *websocket.Conn // Websocket connection
+}
+
 // write words and an image to the websocket.
-func writeToSocket(conn *websocket.Conn, message msg) error {
-	if err := conn.WriteJSON(message); err != nil {
+func (x *OpenSocket) writeToSocket(message Firework) error {
+	if err := x.ws.WriteJSON(message); err != nil {
 		return err
 	}
 	return nil
 }
 
+func (x *OpenSocket) sendMessages(buffer []Firework) error {
+	for _, message := range buffer {
+		err := x.writeToSocket(message)
+		if err != nil {
+			log.Println(err)
+		}
+	}
+	return nil
+}
+
+// Listen for requests from this socket and channel them back to the server to
+// react to them.
+func (x *OpenSocket) listen(channel chan<- IncomingRequest) {
+	for {
+		var fromClient IncomingRequest
+		_, received, err := x.ws.ReadMessage()
+		json.Unmarshal([]byte(received), &fromClient)
+		log.Printf("Received message: %+v", fromClient)
+		if err != nil {
+			log.Println("Couldn't read message: ", err)
+		}
+
+		channel <- fromClient
+	}
+}
+
+// FireworksServer handles sending fireworks and receiving requests for them.
+type FireworksServer struct {
+	// TODO: remove dead sockets
+	sockets []*OpenSocket
+
+	// TODO: make this a ring buffer
+	// TODO: also cache repeated images
+	buffer []Firework
+
+	imageChooser ImageChooser
+
+	requestChannel chan IncomingRequest
+}
+
+func NewFireworksServer() *FireworksServer {
+	return &FireworksServer{
+		// TODO: better slice sizes
+		sockets:        []*OpenSocket{},
+		buffer:         []Firework{},
+		imageChooser:   ImageChooser{},
+		requestChannel: make(chan IncomingRequest),
+	}
+}
+
+// listen for firework requests and create fireworks
+func (x *FireworksServer) makeFireworks() {
+	fmt.Println("Ready to create fireworks")
+	for {
+		req := <-x.requestChannel
+		fmt.Println("Got a message on the channel:", req)
+
+		// TODO: validate the message
+
+		m := Firework{}
+
+		m.Words = fmt.Sprintf("%s: %s", req.Person, req.Color)
+		imageFile := x.imageChooser.chooseImage(strings.ToLower(req.Color))
+
+		fmt.Println("Chose image:", imageFile)
+		if imageFile != "" {
+			encodedImage, err := x.imageChooser.smooshImage(imageFile)
+			if err != nil {
+				log.Printf("Couldn't encode image: %v", err)
+				continue
+			}
+			m.Image = encodedImage
+			x.buffer = append(x.buffer, m)
+		}
+
+		for _, socket := range x.sockets {
+			err := socket.writeToSocket(m)
+			if err != nil {
+				log.Println("Couldn't write to socket: ", err)
+			}
+		}
+	}
+}
+
+// websocket endpoint. Streams firework pictures.
+func (x *FireworksServer) wsEndpoint(w http.ResponseWriter, r *http.Request) {
+	// TODO: are these good buffer numbers?
+	var upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}
+	// Ignore CORS when testing locally.
+	// TODO: pass localtest in as a variable
+	if localtest {
+		upgrader.CheckOrigin = func(r *http.Request) bool {
+			return true
+		}
+	}
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Couldn't upgrade connection: %v", err)
+		return
+	}
+	log.Printf("Websocket connection established with %s", x.GetIP(r))
+
+	socket := &OpenSocket{ws}
+	x.sockets = append(x.sockets, socket)
+
+	err = socket.sendMessages(x.buffer)
+	if err != nil {
+		log.Println(err)
+	}
+
+	err = socket.writeToSocket(Firework{Words: "Welcome to the websockets demo fireworks display. Every piece of software spontaneously generates its own chat functionality. Nobody knows why. This is no exception", Image: ""})
+
+	if err != nil {
+		log.Println(err)
+	}
+	socket.listen(x.requestChannel)
+}
+
+// GetIP gets a requests IP address by reading off the forwarded-for
+// header (for proxies) and falls back to use the remote address.
+func (FireworksServer) GetIP(r *http.Request) string {
+	forwarded := r.Header.Get("X-FORWARDED-FOR")
+	if forwarded != "" {
+		return forwarded
+	}
+	return r.RemoteAddr
+}
+
+// Serve index.html
+func (FireworksServer) homeEndpoint(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	http.ServeFile(w, r, "index.html")
+}
+
 func main() {
 	localtest = true // Flip this when testing locally.
 	port := 80
-	logFile, err := os.OpenFile("logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.SetOutput(logFile)
 	if localtest {
 		log.SetOutput(os.Stdout)
 		port = 8080
+	} else {
+		logFile, err := os.OpenFile("logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.SetOutput(logFile)
 	}
+
 	log.Println("Welcome to some terrible websockets test code.")
-	http.HandleFunc("/fireworks", homeEndpoint) // regular
-	http.HandleFunc("/ws", wsEndpoint)          // upgraded to websocket
+
+	server := NewFireworksServer()
+	go server.makeFireworks()
+
+	http.HandleFunc("/fireworks", server.homeEndpoint) // regular
+	http.HandleFunc("/ws", server.wsEndpoint)          // upgraded to websocket
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
 }
